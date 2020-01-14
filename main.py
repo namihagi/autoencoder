@@ -4,10 +4,9 @@ import tensorflow as tf
 
 from auto_encoder import Model
 
-tf.set_random_seed(19)
-
 parser = argparse.ArgumentParser(description='')
 parser.add_argument('--phase', dest='phase', type=str, default='train')
+parser.add_argument('--sub_dirname', dest='sub_dirname', type=str, default=None)
 parser.add_argument('--dataset_name', dest='dataset_name', type=str)
 args = parser.parse_args()
 

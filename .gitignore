@@ -4,3 +4,5 @@ checkpoint/*
 log/*
 test/*
 __pycache__/*
+input/*
+real/*

@@ -1,49 +1,62 @@
 import os
-import shutil
-import json
 import time
+from glob import glob
 
 import numpy as np
 import tensorflow as tf
-from glob import glob
+from tensorflow.contrib import slim
 from PIL import Image
 
-from tensorflow.contrib import slim
+from copy import deepcopy
 
 BATCH_NORM_MOMENTUM = 0.9
 
 
 def add_noise(images):
+    for image in images:
+        # if np.random.randint(10) > 4:
+        w = np.random.randint(30, 256 - 30 - 25)
+        h = np.random.randint(30, 256 - 30 - 25)
+        noise = np.full((30, 30, 3), -1).astype(np.float32)
+        image[h:h + 30, w:w + 30] = noise.copy()
     return images
 
 
 class Model(object):
     def __init__(self, sess, args):
         self.sess = sess
-        self.test_dir = './test'
 
         # train loop setting
         if args.phase == 'train':
             self.is_training = True
         else:
             self.is_training = False
-        self.epoch = 300
-        self.hidden_dim = 64
+        self.epoch = 100
+        self.hidden_dim = 4
         self.lr = 0.001
 
         # input setting
         self.dataset_name = args.dataset_name
         self.dataset_path = os.path.join('./datasets', self.dataset_name)
         self.checkpoint_dir = os.path.join('./checkpoint', self.dataset_name)
+        if args.sub_dirname is not None:
+            self.checkpoint_dir += args.sub_dirname
         self.batch_size = 8
-        self.image_size = 1024
+        self.image_size = 256
         self.image_channels = 3
+
+        # output setting
+        self.test_dir = os.path.join('./test', self.dataset_name)
+        if args.sub_dirname is not None:
+            self.test_dir += args.sub_dirname
 
         self._build_model()
 
         # saver
         self.saver = tf.train.Saver()
         self.log_dir = './log/{}'.format(self.dataset_name)
+        if args.sub_dirname is not None:
+            self.log_dir += args.sub_dirname
         if not os.path.exists(self.log_dir):
             os.makedirs(self.log_dir)
         self.writer = tf.summary.FileWriter(self.log_dir, self.sess.graph)
@@ -61,42 +74,30 @@ class Model(object):
                                           [self.batch_size, self.image_size, self.image_size, self.image_channels],
                                           name='real_images')
 
-        with tf.variable_scope('encoder'):
-            params = {
-                'padding': 'SAME',
-                'activation_fn': lambda x: tf.nn.relu(x),
-                'normalizer_fn': self.batch_norm, 'data_format': 'NHWC'
-            }
-            with slim.arg_scope([slim.conv2d], **params):
-                with slim.arg_scope([slim.max_pool2d], stride=2, padding='SAME', data_format='NHWC'):
-                    x = slim.conv2d(self.input_images, self.hidden_dim, (3, 3), stride=2, scope='conv1')
-                    # shape is (image_size/2, image_size/2)
-                    x = slim.conv2d(x, self.hidden_dim * 2, (3, 3), stride=2, scope='conv2')
-                    # shape is (image_size/4, image_size/4)
-                    x = slim.conv2d(x, self.hidden_dim * 3, (3, 3), stride=2, scope='conv3')
-                    # shape is (image_size/8, image_size/8)
-                    x = slim.conv2d(x, self.hidden_dim * 4, (3, 3), stride=2, scope='conv4')
-                    # shape is (image_size/16, image_size/16)
+        # encoder
+        net = tf.layers.conv2d(self.input_images, self.hidden_dim, [5, 5], strides=2, padding='SAME',
+                               activation=tf.nn.leaky_relu)
+        net = tf.layers.conv2d(net, self.hidden_dim * 2, [5, 5], strides=2, padding='SAME',
+                               activation=tf.nn.leaky_relu)
+        net = tf.layers.conv2d(net, self.hidden_dim * 3, [5, 5], strides=2, padding='SAME',
+                               activation=tf.nn.leaky_relu)
+        net = tf.layers.conv2d(net, self.hidden_dim * 4, [5, 5], strides=4, padding='SAME',
+                               activation=tf.nn.leaky_relu)
 
-        with tf.variable_scope('decoder'):
-            params = {
-                'padding': 'SAME',
-                'activation_fn': lambda x: tf.nn.relu(x),
-                'normalizer_fn': self.batch_norm, 'data_format': 'NHWC'
-            }
-            with slim.arg_scope([slim.conv2d_transpose], **params):
-                x = slim.conv2d_transpose(x, self.hidden_dim * 3, (3, 3), stride=2, scope='dconv1')
-                # shape is (image_size/8, image_size/8)
-                x = slim.conv2d_transpose(x, self.hidden_dim * 2, (3, 3), stride=2, scope='dconv2')
-                # shape is (image_size/4, image_size/4)
-                x = slim.conv2d_transpose(x, self.hidden_dim, (3, 3), stride=2, scope='dconv3')
-                # shape is (image_size/2, image_size/2)
-
-            self.output_images = slim.conv2d_transpose(x, self.image_channels, (3, 3), stride=2, padding='SAME',
-                                                       activation_fn=lambda x: tf.nn.tanh(x), scope='dconv4')
+        # decoder
+        net = tf.layers.conv2d_transpose(net, self.hidden_dim * 3, [5, 5], strides=4, padding='SAME',
+                                         activation=tf.nn.leaky_relu)
+        net = tf.layers.conv2d_transpose(net, self.hidden_dim * 2, [5, 5], strides=2, padding='SAME',
+                                         activation=tf.nn.leaky_relu)
+        net = tf.layers.conv2d_transpose(net, self.hidden_dim, [5, 5], strides=2, padding='SAME',
+                                         activation=tf.nn.leaky_relu)
+        self.output_images = tf.layers.conv2d_transpose(net, 3, [5, 5], strides=2,
+                                                        padding='SAME', activation=tf.nn.tanh)
 
         # loss
-        self.loss = tf.reduce_mean((self.input_images - self.output_images) ** 2)
+        # self.loss = tf.reduce_mean(tf.abs(self.real_images - self.output_images))
+        # self.loss = tf.reduce_mean(tf.square(self.real_images - self.output_images))
+        self.loss = tf.reduce_mean(tf.pow(self.real_images - self.output_images, 2))
         self.loss_sum = tf.summary.scalar('loss', self.loss)
 
         # get variables
@@ -105,35 +106,37 @@ class Model(object):
             print(var.name)
 
         # optimizer
-        self.opt = tf.train.GradientDescentOptimizer(self.lr).minimize(self.loss, var_list=self.vars)
+        self.opt = tf.train.AdamOptimizer(self.lr).minimize(self.loss)
 
     def train(self):
         print('start train')
         # get file list
         train_images = glob(os.path.join(self.dataset_path, 'train', '*.png'))
         # input dataset
-        dataset = ImagePipeline(self.is_training, train_images, self.epoch, self.batch_size, self.image_size)
-        next_el = dataset.get_next_el()
+        with tf.device('/cpu:0'):
+            # (self, is_training, file_paths, epoch, batch_size=1, image_size=512):
+            dataset = ImagePipeline(self.is_training, file_paths=train_images, epoch=self.epoch,
+                                    batch_size=self.batch_size, image_size=self.image_size)
+            next_el = dataset.get_next_el()
 
         counter = 0
         start_time = time.time()
         while 1:
             try:
                 image_paths, input_images = self.sess.run(next_el)
-                real_images = input_images
+                real_images = deepcopy(input_images)
+                input_images = add_noise(input_images)
+                # self.save_images_real(image_paths, real_images)
+                # self.save_images_input(image_paths, input_images)
 
-                if np.random.randint(10) > 4:
-                    input_images = add_noise(input_images)
-
-                loss, loss_sum = self.sess.run([self.loss, self.loss_sum],
-                                                feed_dict={self.input_images: input_images,
-                                                           self.real_images: real_images})
+                _, loss, loss_sum = self.sess.run([self.opt, self.loss, self.loss_sum],
+                                                  feed_dict={self.input_images: input_images,
+                                                             self.real_images: real_images})
                 self.writer.add_summary(loss_sum, counter)
 
                 counter += 1
-                if (counter+1) % 20 == 0:
-                    print('{}/{}, loss:{}'.format(counter, ((len(train_images)//self.batch_size)+1)*self.epoch, loss))
-                    # self.save_sample()
+                print('{}/{}, loss:{}'.format(counter, (len(train_images) * self.epoch) // self.batch_size, loss))
+                # self.save_sample()
 
             except tf.errors.OutOfRangeError as E:
                 print('\nfinished saving feature_maps as npy file.')
@@ -164,14 +167,53 @@ class Model(object):
         while 1:
             try:
                 image_paths, input_images = self.sess.run(next_el)
+                # input_images = add_noise(input_images)
+                self.save_images_input(image_paths, input_images)
 
                 output_images = self.sess.run(self.output_images,
                                               feed_dict={self.input_images: input_images})
-
                 counter += 1
-                print('{}/{}'.format(counter, len(test_images)//self.batch_size))
+                print('{}/{}'.format(counter, len(test_images) // self.batch_size))
 
                 self.save_images(image_paths, output_images)
+
+                for image_path, input_image, output_image in zip(image_paths, input_images, output_images):
+                    print(image_path)
+                    print(((input_image - output_image) ** 2).sum())
+
+            except tf.errors.OutOfRangeError as E:
+                print('\nfinished saving feature_maps as npy file.')
+                break
+            except Exception as E:
+                print(E)
+                break
+
+        print('train image')
+        # get file list
+        train_images = glob(os.path.join(self.dataset_path, 'train', '*.png'))
+        # input dataset
+        dataset = ImagePipeline(self.is_training, train_images, self.epoch, self.batch_size, self.image_size)
+        next_el = dataset.get_next_el()
+
+        counter = 0
+        while 1:
+            try:
+                image_paths, input_images = self.sess.run(next_el)
+                # input_images = add_noise(input_images)
+                self.save_images_input(image_paths, input_images)
+
+                output_images = self.sess.run(self.output_images,
+                                              feed_dict={self.input_images: input_images})
+                counter += 1
+                print('{}/{}'.format(counter, len(test_images) // self.batch_size))
+
+                self.save_images(image_paths, output_images)
+
+                if counter == 2:
+                    break
+                for image_path, input_image, output_image in zip(image_paths, input_images, output_images):
+                    print(image_path)
+                    print(((input_image - output_image) ** 2).sum())
 
             except tf.errors.OutOfRangeError as E:
                 print('\nfinished saving feature_maps as npy file.')
@@ -181,14 +223,47 @@ class Model(object):
                 break
 
     def save_images(self, image_paths, output_images):
-        output_dir = os.path.join(self.test_dir, self.dataset_name)
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+        if not os.path.exists(self.test_dir):
+            os.makedirs(self.test_dir)
 
         for path, image in zip(image_paths, output_images):
-            image = np.uint8((image + 1.0)/2)
+            image = (image + 1.0) * 127.5
             path = str(path.decode('utf-8'))
-            Image.fromarray(image).save(os.path.join(output_dir, path.split('/')[-1].replace('.png', '.jpg')))
+            Image.fromarray(image.astype(np.uint8)).save(
+                os.path.join(self.test_dir, path.split('/')[-1].replace('.png', '.jpg')))
+
+    def save_images_real(self, image_paths, output_images):
+        real_dir = self.test_dir.replace('test', 'real')
+        if not os.path.exists(real_dir):
+            os.makedirs(real_dir)
+
+        for path, image in zip(image_paths, output_images):
+            image = (image + 1.0) * 127.5
+            path = str(path.decode('utf-8'))
+            Image.fromarray(image.astype(np.uint8)).save(
+                os.path.join(real_dir, path.split('/')[-1].replace('.png', '.jpg')))
+
+    def save_images_diff(self, image_paths, output_images):
+        real_dir = self.test_dir.replace('test', 'diff')
+        if not os.path.exists(real_dir):
+            os.makedirs(real_dir)
+
+        for path, image in zip(image_paths, output_images):
+            image = (image + 1.0) * 127.5
+            path = str(path.decode('utf-8'))
+            Image.fromarray(image.astype(np.uint8)).save(
+                os.path.join(real_dir, path.split('/')[-1].replace('.png', '.jpg')))
+
+    def save_images_input(self, image_paths, output_images):
+        input_dir = self.test_dir.replace('test', 'input')
+        if not os.path.exists(input_dir):
+            os.makedirs(input_dir)
+
+        for path, image in zip(image_paths, output_images):
+            image = (image + 1.0) * 127.5
+            path = str(path.decode('utf-8')).replace('test', 'input')
+            Image.fromarray(image.astype(np.uint8)).save(
+                os.path.join(input_dir, path.split('/')[-1].replace('.png', '.jpg')))
 
     def save(self, checkpoint_dir, counter):
         model_name = "{}.model".format(self.dataset_name)
@@ -245,20 +320,5 @@ class ImagePipeline:
         image.set_shape([None, None, 3])
         image = tf.image.resize_images(image, [self.image_size, self.image_size])
         image = tf.cast(image, tf.float32)
-        image = image/127.5 - 1.0
+        image = image / 127.5 - 1.0
         return image_path, image
-
-
-def main(_):
-    tfconfig = tf.ConfigProto(allow_soft_placement=True)
-    tfconfig.gpu_options.allow_growth = True
-    usable_gpu = "0"
-    tfconfig.gpu_options.visible_device_list = usable_gpu
-    with tf.Session(config=tfconfig) as sess:
-        model = Model(sess)
-        model.train()
-        # model.test()
-
-
-if __name__ == '__main__':
-    tf.app.run()
